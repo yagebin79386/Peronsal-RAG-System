@@ -228,7 +228,7 @@ class PersonalRAG:
                     raise ValueError("OpenAI API key required when local model is unavailable")
                     
                 self.llm = ChatOpenAI(
-                    model="gpt-4",
+                    model="gpt-4o-mini",  # Use the new GPT-4o mini model
                     api_key=self.openai_api_key,
                     temperature=0.7
                 )
@@ -240,12 +240,12 @@ class PersonalRAG:
                 raise ValueError("OpenAI API key required for GPT models")
                 
             self.llm = ChatOpenAI(
-                model="gpt-4",
+                model="gpt-4o-mini",  # Use the new GPT-4o mini model
                 api_key=self.openai_api_key,
                 temperature=0.7
             )
             self.using_local_model = False
-            print("Using OpenAI GPT-4 model")
+            print("Using OpenAI GPT-4 Turbo model")
             
         elif self.llm_type == "claude":
             if not self.anthropic_api_key:
@@ -481,7 +481,7 @@ class PersonalRAG:
             anns_field="embedding",
             param={"metric_type": metric_type, "params": search_params},
             limit=limit,
-            output_fields=["content", "type", "file_path", "chunk_index"]
+            output_fields=["content", "file_path", "chunk_index", "metadata"]
         )
         
         return results
@@ -504,7 +504,7 @@ class PersonalRAG:
         # Search in Milvus
         results = self.collection.query(
             expr=expr,
-            output_fields=["content", "type", "file_path", "chunk_index"],
+            output_fields=["content", "file_path", "chunk_index", "metadata"],
             limit=limit
         )
         

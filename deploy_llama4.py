@@ -25,9 +25,9 @@ def check_huggingface_login():
         print("Please run 'huggingface-cli login' to log in.")
         return False
 
-def deploy_llama4(model_id="meta-llama/Llama-4-Maverick-17B-128E-Instruct", device="auto", max_new_tokens=1024, temperature=0.7):
+def deploy_llama4(model_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0", device="auto", max_new_tokens=1024, temperature=0.7):
     """
-    Deploy Llama 4 model locally for use with PersonalRAG.
+    Deploy language model locally for use with PersonalRAG.
     
     Args:
         model_id: The model ID to load from Hugging Face
@@ -38,67 +38,56 @@ def deploy_llama4(model_id="meta-llama/Llama-4-Maverick-17B-128E-Instruct", devi
     Returns:
         A tuple of (tokenizer, model, pipe)
     """
-    print(f"Loading Llama 4 model: {model_id}")
-    
-    # Check if user is logged in to Hugging Face
-    if not check_huggingface_login():
-        print("Attempting to log in to Hugging Face...")
-        subprocess.run(["huggingface-cli", "login"])
+    print(f"Loading model: {model_id}")
     
     try:
-        # Load tokenizer and model directly
-        print("Loading tokenizer and model...")
+        # Load tokenizer and model separately
+        print("Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(model_id)
+        
+        print("Loading model...")
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.float16,
             device_map=device,
+            torch_dtype=torch.float16
         )
         
-        # Create a custom pipeline
-        def generate_text(messages):
-            # Format messages for the model
-            prompt = ""
-            for msg in messages:
-                role = msg["role"]
-                content = msg["content"]
-                if role == "user":
-                    prompt += f"User: {content}\n\nAssistant: "
-                elif role == "assistant":
-                    prompt += f"{content}\n\n"
-            
-            # Generate response
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-            )
-            response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Extract just the assistant's response
-            response = response.split("Assistant: ")[-1].strip()
-            
-            return [{"generated_text": response}]
+        # Create pipeline
+        print("Creating pipeline...")
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            device_map=device
+        )
         
         # Test the model
         test_messages = [
             {"role": "user", "content": "Who are you?"},
         ]
-        test_result = generate_text(test_messages)
-        print("Model test successful!")
+        print("Testing model...")
         
-        print("Llama 4 model loaded successfully!")
-        return tokenizer, model, generate_text
+        # Format the test message
+        prompt = f"User: {test_messages[0]['content']}\n\nAssistant:"
+        test_result = pipe(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=True
+        )
+        print("Model test successful!")
+        print(f"Test response: {test_result[0]['generated_text']}")
+        
+        print("Model loaded successfully!")
+        return tokenizer, model, pipe
         
     except Exception as e:
-        print(f"Error loading Llama 4 model: {str(e)}")
+        print(f"Error loading model: {str(e)}")
         raise
 
 def main():
-    parser = argparse.ArgumentParser(description="Deploy Llama 4 model locally")
-    parser.add_argument("--model_id", type=str, default="meta-llama/Llama-4-Maverick-17B-128E-Instruct", 
+    parser = argparse.ArgumentParser(description="Deploy language model locally")
+    parser.add_argument("--model_id", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", 
                         help="Model ID to load from Hugging Face")
     parser.add_argument("--device", type=str, default="auto", 
                         help="Device to load the model on (auto, cuda, cpu)")
@@ -113,7 +102,7 @@ def main():
     load_dotenv()
     
     # Deploy model
-    tokenizer, model, generate_text = deploy_llama4(
+    tokenizer, model, pipe = deploy_llama4(
         model_id=args.model_id,
         device=args.device,
         max_new_tokens=args.max_new_tokens,
