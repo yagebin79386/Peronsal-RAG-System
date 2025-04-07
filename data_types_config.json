@@ -1,0 +1,92 @@
+{
+  "local": {
+    "name": "local",
+    "enabled": true,
+    "document_types": {
+      "document": {
+        "extensions": [".pdf", ".doc", ".docx", ".txt", ".rtf"],
+        "embedding_type": "clip_text",
+        "description": "Text documents",
+        "enabled": true
+      },
+      "video_frame": {
+        "extensions": [".mp4", ".avi", ".mov", ".mkv"],
+        "embedding_type": "clip_image",
+        "description": "Video files processed as frames",
+        "enabled": true
+      },
+      "audio": {
+        "extensions": [".mp3", ".wav", ".m4a", ".flac"],
+        "embedding_type": "wav2vec",
+        "description": "Audio files",
+        "enabled": true
+      },
+      "image": {
+        "extensions": [".jpg", ".jpeg", ".png", ".gif", ".bmp"],
+        "embedding_type": "clip_image",
+        "description": "Image files",
+        "enabled": true
+      }
+    }
+  },
+  "github": {
+    "name": "github",
+    "enabled": true,
+    "document_types": {
+      "code": {
+        "extensions": [".py", ".js", ".java", ".cpp", ".go", ".rs"],
+        "embedding_type": "clip_text",
+        "description": "Programming language files",
+        "enabled": true
+      },
+      "document": {
+        "extensions": [".md", ".txt", ".rst", ".adoc"],
+        "embedding_type": "clip_text",
+        "description": "Documentation files",
+        "enabled": true
+      },
+      "config": {
+        "extensions": [".yml", ".yaml", ".json", ".toml"],
+        "embedding_type": "clip_text",
+        "description": "Configuration files",
+        "enabled": true
+      }
+    }
+  },
+  "onenote": {
+    "name": "onenote",
+    "enabled": true,
+    "document_types": {
+      "note": {
+        "extensions": [".one"],
+        "embedding_type": "clip_text",
+        "description": "OneNote pages and notebooks",
+        "enabled": true
+      },
+      "image_attachment": {
+        "extensions": [".jpg", ".jpeg", ".png", ".gif", ".bmp"],
+        "embedding_type": "clip_image",
+        "description": "OneNote image attachments",
+        "enabled": true
+      },
+      "video_attachment": {
+        "extensions": [".mp4", ".avi", ".mov", ".mkv"],
+        "embedding_type": "clip_image",
+        "description": "OneNote video attachments",
+        "enabled": true
+      },
+      "audio_attachment": {
+        "extensions": [".mp3", ".wav", ".m4a", ".flac"],
+        "embedding_type": "wav2vec",
+        "description": "OneNote audio attachments",
+        "enabled": true
+      },
+      "document_attachment": {
+        "extensions": [".pdf", ".doc", ".docx", ".txt", ".rtf"],
+        "embedding_type": "clip_text",
+        "description": "OneNote document attachments",
+        "enabled": true
+      }
+    }
+  }
+} 

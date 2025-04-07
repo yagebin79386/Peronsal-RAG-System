@@ -1,0 +1,1 @@
+This is a sample document for testing the data ingestion process. It contains some text that will be processed and indexed by the system.
