@@ -41,6 +41,7 @@ import threading
 import librosa
 import hashlib
 import functools
+import inspect
 
 # LangChain document loaders
 from langchain_community.document_loaders import (
@@ -606,13 +607,56 @@ class DataIngestion:
             return {}
     
     def _process_image(self, file_path: str) -> Dict[str, Any]:
-        """Process image file metadata."""
-        file_name = os.path.basename(file_path)
-        return {
-            'content': f"Image file: {file_name}",
-            'metadata': {'file_path': file_path, 'file_type': 'image'},
-            'extraction_method': 'image_metadata'
-        }
+        """Process image file and return both the image and metadata.
+        
+        Args:
+            file_path: Path to the image file
+            
+        Returns:
+            Dictionary containing:
+            - image: PIL Image object
+            - content: Text description
+            - metadata: File metadata
+            - description: Image description (if available)
+        """
+        try:
+            # Log start of processing
+            file_name = os.path.basename(file_path)
+            logger.info(f"Processing image: {file_name}")
+            
+            # Load the image using PIL
+            image = Image.open(file_path)
+            
+            # Convert to RGB if needed (some images might be in RGBA or other formats)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Get basic metadata
+            width, height = image.size
+            
+            # Create a basic description
+            description = f"Image: {file_name} ({width}x{height} pixels)"
+            
+            # Log successful processing
+            logger.info(f"Successfully processed image: {file_name} ({width}x{height})")
+            
+            return {
+                'image': image,  # The actual PIL Image object
+                'content': f"Image file: {file_name}",
+                'metadata': {
+                    'file_path': file_path,
+                    'file_type': 'image',
+                    'width': width,
+                    'height': height,
+                    'format': image.format
+                },
+                'description': description,
+                'extraction_method': 'image_processing'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing image {file_path}: {str(e)}")
+            return None
         
     def _process_video_metadata(self, file_path: str) -> Dict[str, Any]:
         """Process video file metadata."""
@@ -1208,36 +1252,66 @@ class DataIngestion:
 
     @with_milvus_recovery(max_attempts=3)
     def add_to_milvus_with_timestamp(self, content, embedding, doc_type, source, timestamp):
-        """Add document to Milvus with timestamp."""
+        """Add document to Milvus with timestamp for versioning.
+        
+        Args:
+            content: Content to store
+            embedding: Vector embedding
+            doc_type: Document type
+            source: Source path
+            timestamp: Timestamp
+            
+        Returns:
+            Boolean indicating success
+        """
+        max_retries = 5
+        retry_delay = 2
+        
+        # Ensure embedding is a numpy float32 array
+        if not isinstance(embedding, np.ndarray):
+            logger.warning("Converting embedding to numpy array")
+            embedding = np.array(embedding, dtype=np.float32)
+            
+        # Ensure embedding is a 1D float32 array with the correct shape
         if embedding.ndim > 1:
             embedding = embedding.squeeze()
-        embedding_list = embedding.tolist()
-        
-        # Check content length and chunk if necessary
-        max_content_length = 65000  # Slightly less than the field limit of 65535 to be safe
-        
-        # If content exceeds max length, we need to chunk it
-        if len(content) > max_content_length:
-            logger.info(f"Content length ({len(content)}) exceeds maximum ({max_content_length}), chunking...")
             
-            # First delete any existing chunks for this source
-            try:
-                self.collection.delete(f'file_path == "{source}"')
-                logger.info(f"Deleted existing chunks for source: {source}")
-            except Exception as e:
-                logger.warning(f"Error deleting existing chunks: {str(e)}")
-            
-            # Add new chunks
-            return self._add_chunked_content_to_milvus(content, embedding_list, doc_type, source, timestamp)
+        # Ensure dtype is float32 (required by Milvus)
+        if embedding.dtype != np.float32:
+            embedding = embedding.astype(np.float32)
         
-        # Add retry mechanism for Milvus operations
-        max_retries = 5
-        retry_delay = 2  # seconds
+        # Check embedding size
+        if embedding.shape[0] != 512:
+            logger.warning(f"Embedding has unexpected size: {embedding.shape[0]}, expected 512")
+            if embedding.shape[0] > 512:
+                # Truncate if too large
+                embedding = embedding[:512]
+            else:
+                # Pad with zeros if too small
+                padding = np.zeros(512 - embedding.shape[0], dtype=np.float32)
+                embedding = np.concatenate((embedding, padding))
+        
+        # Create a safe file path for Milvus
+        sanitized_source = self._sanitize_file_path(source)
+        
+        # Always store a consistent path format in Milvus to avoid
+        # having different formats for the same file
+        file_path_to_store = sanitized_source
+        
+        # Create unique ID with source path and timestamp, ensure it doesn't exceed limits
+        unique_id = f"{sanitized_source}_{timestamp}"
+        if len(unique_id) > 90:  # Leave buffer below 100-char limit
+            # Keep recognizable prefix but hash the rest
+            prefix = sanitized_source[:40]  # Use shorter prefix for ID
+            rest_hash = hashlib.md5(f"{sanitized_source[40:]}_{timestamp}".encode()).hexdigest()[:30]
+            unique_id = f"{prefix}_id_{rest_hash}"
+            logger.debug(f"Created shortened ID: {unique_id} (length: {len(unique_id)})")
         
         for attempt in range(max_retries):
             try:
                 # First try to find existing document with the same source
-                search_params = {"expr": f'file_path == "{source}"'}
+                search_params = {"expr": f'file_path == "{file_path_to_store}"'}
+                logger.debug(f"Searching Milvus with query: {search_params['expr']}")
                 results = self.collection.query(
                     expr=search_params["expr"],
                     output_fields=["id"]
@@ -1245,29 +1319,20 @@ class DataIngestion:
                 
                 if results:
                     # Update existing document by deleting and reinserting
-                    self.collection.delete(f'file_path == "{source}"')
-                
-                # Generate a unique ID that includes the source
-                unique_id = source
-                if len(unique_id) > 100:  # ID field has max_length=100
-                    # Use a hash if the ID would be too long
-                    unique_id = hashlib.md5(unique_id.encode()).hexdigest()
+                    logger.debug(f"Found existing document in Milvus, deleting: {source}")
+                    self.collection.delete(f'file_path == "{file_path_to_store}"')
                 
                 # Insert new or updated document
                 self.collection.insert([{
                     "id": unique_id,
-                    "file_path": source,
+                    "file_path": file_path_to_store,
                     "chunk_index": 0,
                     "last_modified": timestamp,
                     "content": content,
                     "metadata": {"type": doc_type, "source": source},
-                    "embedding": embedding_list
+                    "embedding": embedding  # Use numpy array directly
                 }])
                 logger.info(f"Added/updated document in Milvus: type={doc_type}, source={source}")
-                
-                # If we successfully added to Milvus, log the file as new/modified for monitoring
-                if source.startswith("github://"):
-                    logger.info(f"Added NEW file to Milvus: {source}")
                 
                 return True  # Success, exit function
             except Exception as e:
@@ -1305,104 +1370,103 @@ class DataIngestion:
             True if file needs to be updated (either not in Milvus or has a newer timestamp)
         """
         # Add retry mechanism for Milvus operations
-        max_retries = 3  # Reduced from 5
-        retry_delay = 1  # seconds - Reduced from 2
-        query_timeout = 10  # seconds timeout for Milvus query
+        max_retries = 3
+        retry_delay = 1
+        query_timeout = 10
         
         # Static cache for file update checks (class variable)
         if not hasattr(self.__class__, '_file_check_cache'):
             self.__class__._file_check_cache = {}
             
-        # Check cache first
-        cache_key = f"{source_path}:{timestamp}"
+        # Sanitize path using the enhanced approach for safe querying
+        sanitized_path = self._sanitize_file_path(source_path)
+        
+        # Check cache first - use a consistent cache key format
+        cache_key = f"{sanitized_path}:{timestamp}"
         if cache_key in self.__class__._file_check_cache:
             cached_result = self.__class__._file_check_cache[cache_key]
             logger.debug(f"Using cached result for {source_path}: {cached_result}")
-            if not cached_result:
-                logger.info(f"UNCHANGED FILE - skipping (cached): {source_path}")
             return cached_result
             
-        # Start timing the operation
+        # Start timing for performance reporting
         start_time = time.time()
         
-        for attempt in range(max_retries):
-            try:
-                # Use a more direct query approach with a timeout
-                # Escape special characters in source path to avoid SQL injection in query
-                escaped_source = source_path.replace("'", "''").replace('"', '""')
-                search_params = {"expr": f'file_path == "{escaped_source}"'}
+        # First check if the file exists at all using _is_new_file
+        # This avoids duplicating the search logic
+        is_new = self._is_new_file(source_path)
+        if is_new:
+            logger.info(f"NEW FILE DETECTED - not in database, will process: {source_path}")
+            self.__class__._file_check_cache[cache_key] = True
+            return True
             
-                # Set a timeout for the query operation
-                signal.alarm(query_timeout)
-                try:
-                    # Query Milvus for existing record - use optimized query with only needed fields
-                    results = self.collection.query(
-                        expr=search_params["expr"],
-                        output_fields=["last_modified"],
-                        limit=1  # Only need one result
-                    )
-                    # Reset the alarm
-                    signal.alarm(0)
-                except TimeoutError:
-                    logger.warning(f"Milvus query timed out after {query_timeout}s for {source_path}")
-                    # If we timeout, assume the file needs to be updated
-                    self.__class__._file_check_cache[cache_key] = True
-                    return True
+        # File exists, now find it and check timestamp
+        try:
+            # First try with sanitized path using exact match
+            expr = f'file_path == "{sanitized_path}"'
+            results = self.collection.query(
+                expr=expr,
+                output_fields=["last_modified", "file_path", "metadata"],
+                limit=1
+            )
             
-                # If no results, file is not in database yet, needs processing
+            # If not found by exact path, try with hash-based ID
+            if not results:
+                # Hash the source_path to create a consistent unique identifier
+                source_hash = hashlib.md5(source_path.encode()).hexdigest()[:16]
+                expr = f'id == "{source_hash}"'
+                
+                # Try searching by ID hash
+                results = self.collection.query(
+                    expr=expr,
+                    output_fields=["id", "last_modified", "metadata"],
+                    limit=5
+                )
+                
+                # If nothing found by ID hash, retrieve most recent entries
                 if not results:
-                    logger.info(f"NEW FILE DETECTED - not in database, will process: {source_path}")
-                    self.__class__._file_check_cache[cache_key] = True
-                    return True
+                    # Use a limited query to check only the most recently added files
+                    results = self.collection.query(
+                        expr='',  # Empty query to get all records, but with limit
+                        output_fields=["id", "last_modified", "metadata"],
+                        limit=20
+                    )
+                    
+                    # Manually filter results to find matches by source
+                    if results:
+                        filtered_results = []
+                        for result in results:
+                            metadata = result.get("metadata", {})
+                            if isinstance(metadata, dict) and metadata.get("source") == source_path:
+                                filtered_results.append(result)
+                        results = filtered_results
             
-                # Get existing timestamp and ensure it's an integer for comparison
-                try:
-                    existing_timestamp = int(results[0].get("last_modified", 0))
-                    # Ensure current timestamp is also an integer
-                    current_timestamp = int(timestamp)
-                    needs_update = current_timestamp > existing_timestamp
-                except (TypeError, ValueError) as e:
-                    logger.warning(f"Error converting timestamps for comparison: {str(e)}")
-                    # If there's an issue with timestamp comparison, assume we need to update
-                    needs_update = True
-            
-                # Log the result and timing information
+            # Get existing timestamp and compare
+            if results:
+                existing_timestamp = int(results[0].get("last_modified", 0))
+                current_timestamp = int(timestamp)
+                needs_update = current_timestamp > existing_timestamp
+                
+                # Log result with timing
                 elapsed_time = time.time() - start_time
                 if needs_update:
-                        logger.info(f"MODIFIED FILE - changed since last ingestion, will update: {source_path} (in {elapsed_time:.2f}s)")
+                    logger.info(f"MODIFIED FILE - changed since last ingestion, will update: {source_path} (in {elapsed_time:.2f}s)")
                 else:
-                        logger.info(f"UNCHANGED FILE - skipping: {source_path} (in {elapsed_time:.2f}s)")
+                    logger.info(f"UNCHANGED FILE - skipping: {source_path} (in {elapsed_time:.2f}s)")
                 
                 # Cache the result
                 self.__class__._file_check_cache[cache_key] = needs_update
                 return needs_update
+            else:
+                # This is an edge case - _is_new_file found it but we couldn't
+                # In this case, assume it needs updating to be safe
+                logger.warning(f"File lookup inconsistency for {source_path} - assuming update needed")
+                self.__class__._file_check_cache[cache_key] = True
+                return True
                 
-            except Exception as e:
-                # Reset the alarm to prevent lingering timeouts
-                signal.alarm(0)
-                
-                if attempt < max_retries - 1:
-                    logger.warning(f"Milvus query failed (attempt {attempt+1}/{max_retries}): {str(e)}")
-                    logger.warning(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                    # Increase delay for next attempt (exponential backoff)
-                    retry_delay *= 2
-                    
-                    # Try to reconnect to Milvus if the error appears to be connection-related
-                    if "connect" in str(e).lower() or "connection" in str(e).lower():
-                        try:
-                            logger.info("Attempting to reconnect to Milvus...")
-                            connections.disconnect("default")
-                            time.sleep(1)
-                            connections.connect(host='localhost', port='19530')
-                            logger.info("Reconnected to Milvus")
-                        except Exception as reconnect_error:
-                            logger.warning(f"Failed to reconnect to Milvus: {str(reconnect_error)}")
-                else:
-                    logger.error(f"ERROR checking if file needs update: {str(e)}")
-                    logger.error(f"For source path: {source_path}")
-                    # If there's an error checking, assume we need to update to be safe
-                    self.__class__._file_check_cache[cache_key] = True
+        except Exception as e:
+            logger.error(f"Error checking if file needs update: {str(e)}")
+            # If there's an error, assume it needs updating to be safe
+            self.__class__._file_check_cache[cache_key] = True
             return True
 
     # ----- MAIN INGESTION PIPELINE METHODS -----
@@ -1452,17 +1516,24 @@ class DataIngestion:
             self.ensure_milvus_running()
             
             for file_path, file_timestamp in batch:
-                # Check if file needs updating
+                # First check if file needs updating using our consolidated approach
+                needs_update = self._check_if_file_needs_update(file_path, file_timestamp)
+                if not needs_update:
+                    logger.debug(f"Skipping unchanged file: {file_path}")
+                    skipped_count += 1
+                    continue
+                
+                # Since we've determined the file needs updating, check if it's new or modified
                 is_new = self._is_new_file(file_path)
                 if is_new:
-                    logger.info(f"Found NEW file to process: {file_path}")
                     new_files_count += 1
+                else:
+                    modified_files_count += 1
                 
+                # Process the file
                 result = self.process_and_ingest_file(file_path, file_timestamp)
                 if result:
                     processed_count += 1
-                    if not is_new:
-                        modified_files_count += 1
                 else:
                     skipped_count += 1
         
@@ -1499,11 +1570,16 @@ class DataIngestion:
                 file_timestamp = int(os.path.getmtime(file_path))
             source_path = file_path  # Use file path as source
             
-            # Check if file needs to be updated
-            needs_update = self._check_if_file_needs_update(source_path, file_timestamp)
-            if not needs_update:
-                logger.info(f"Skipping unchanged file: {file_path}")
-                return False
+            # If we're called from process_directory, it has already checked if file needs updating
+            calling_frames = [frame_info.function for frame_info in inspect.stack()]
+            if 'process_directory' in calling_frames:
+                logger.debug(f"Skipping redundant update check for {file_path} (already checked by process_directory)")
+            else:
+                # Check if file needs to be updated
+                needs_update = self._check_if_file_needs_update(source_path, file_timestamp)
+                if not needs_update:
+                    logger.info(f"Skipping unchanged file: {file_path}")
+                    return False
             
             # Pre-check Milvus container status
             self.ensure_milvus_running()
@@ -2087,6 +2163,9 @@ class DataIngestion:
                             cache_file_handle.write(token_cache.serialize())
                             logger.info("Token cache updated")
                     
+                    # Store the token acquisition time
+                    self.token_acquisition_time = time.time()
+                    
                     return result["access_token"]
                 else:
                     if result and "error" in result:
@@ -2114,6 +2193,9 @@ class DataIngestion:
                     with open(cache_file, 'w') as cache_file_handle:
                         cache_file_handle.write(token_cache.serialize())
                         logger.info("Token cache saved")
+                
+                # Store the token acquisition time
+                self.token_acquisition_time = time.time()
                 
                 return result["access_token"]
             else:
@@ -2149,12 +2231,42 @@ class DataIngestion:
             logger.error(f"Error getting OneNote access token: {str(e)}")
             logger.error("Please verify your Azure AD app configuration and try again.")
             raise
+            
+    def _refresh_token_if_needed(self):
+        """Check if token is close to expiry and refresh if needed."""
+        # Check if we need to track token expiration 
+        if not hasattr(self, 'token_acquisition_time'):
+            self.token_acquisition_time = time.time()
+            return
+            
+        # Access tokens typically last 1 hour (3600 seconds)
+        # Refresh when it's older than 50 minutes (3000 seconds)
+        current_time = time.time()
+        token_age = current_time - self.token_acquisition_time
+        
+        if token_age > 3000:
+            logger.info(f"Access token is {token_age/60:.1f} minutes old, refreshing...")
+            try:
+                self.onenote_token = self.get_onenote_access_token()
+                logger.info("Successfully refreshed access token")
+            except Exception as e:
+                logger.warning(f"Failed to refresh token: {e}")
 
-    def make_request_with_retry(self, url: str, headers: Dict[str, str], max_retries: int = 3) -> Optional[requests.Response]:
+    def make_request_with_retry(self, url: str, headers: Dict[str, str], max_retries: int = 3, accept_header: str = None) -> Optional[requests.Response]:
         """Make an HTTP request with retry logic for rate limiting."""
         # Log the request URL (truncate if too long)
         display_url = url if len(url) < 100 else url[:97] + "..."
         logger.info(f"Making request to: {display_url}")
+        
+        # Check and refresh token if needed before making the request
+        if "Authorization" in headers and headers["Authorization"].startswith("Bearer "):
+            self._refresh_token_if_needed()
+            # Update the headers with the latest token
+            headers["Authorization"] = f"Bearer {self.onenote_token}"
+            
+        # Add accept header if provided
+        if accept_header:
+            headers["Accept"] = accept_header
         
         for attempt in range(max_retries):
             try:
@@ -2186,6 +2298,20 @@ class DataIngestion:
                     time.sleep(retry_after)
                     continue
                 
+                # Handle authentication failures by refreshing token and retrying
+                if response.status_code == 401:  # Unauthorized
+                    logger.warning("Unauthorized request (401). Token might be expired, refreshing...")
+                    try:
+                        # Force token refresh
+                        self.token_acquisition_time = 0  # This forces a refresh
+                        self._refresh_token_if_needed()
+                        # Update headers with new token
+                        headers["Authorization"] = f"Bearer {self.onenote_token}"
+                        if attempt < max_retries - 1:
+                            continue  # Try again with new token
+                    except Exception as e:
+                        logger.error(f"Failed to refresh token: {e}")
+                
                 # For non-successful responses except 404 (not found)
                 if response.status_code >= 400 and response.status_code != 404:
                     # Log error response body
@@ -2204,10 +2330,8 @@ class DataIngestion:
                             time.sleep(wait_time)
                             continue
                         # For client errors (4xx), only retry certain ones
-                        elif response.status_code in [400, 401, 403]:
-                            if response.status_code == 401:  # Unauthorized - token might be expired
-                                logger.warning("Unauthorized request. Token might be expired.")
-                            elif response.status_code == 400:
+                        elif response.status_code in [400, 403]:
+                            if response.status_code == 400:
                                 logger.warning("Bad request. This could be due to malformed request or resource limitations.")
                             logger.warning(f"Client error: {response.status_code} for URL: {url}")
                     # Don't raise for status, just return the response with error code
@@ -2425,7 +2549,7 @@ class DataIngestion:
                 return 0
             
             html_content = content_response.text
-            text_content = ' '.join(html_content.split())  # Simple HTML to text conversion
+            text_content = self._html_to_text(html_content) # Simple HTML to text conversion
             
             # Generate CLIP text embedding
             embedding = self.generate_embedding(text_content, EmbeddingType.CLIP_TEXT)
@@ -2442,7 +2566,9 @@ class DataIngestion:
     def _process_onenote_attachments(self, page_id, page_title, notebook_name, source_path, 
                                     headers, graph_api, doc_configs):
         """Process attachments in a OneNote page."""
+        # Initialize processed_count at the beginning
         processed_count = 0
+        
         try:
             # First get page metadata to check last modified time
             page_metadata_response = self.make_request_with_retry(
@@ -2529,19 +2655,18 @@ class DataIngestion:
                     img_name = img.get('alt') or f"image_{hash(img_url)}"
                     attachment_source = f"{source_path}/image/{img_name}"
                     
-                    # For attachments, we use the page's timestamp - attachments don't have their own timestamp
-                    # but they're tied to the page's modification time
+                    # Get attachment-specific timestamp
+                    attachment_timestamp = self._get_attachment_timestamp(img_url, page_timestamp)
                     
-                    # Check if attachment needs updating based on page timestamp
-                    # This is because OneNote doesn't provide timestamps for individual attachments
-                    needs_update = self._check_if_file_needs_update(attachment_source, page_timestamp)
+                    # Check if attachment needs updating based on attachment timestamp
+                    needs_update = self._check_if_file_needs_update(attachment_source, attachment_timestamp)
                     if not needs_update:
                         continue
                     
                     # Process the image if this type is enabled in configuration
                     if self._is_image_attachment(os.path.splitext(img_name)[1], img_type, doc_configs):
                         processed_count += self._process_onenote_image(
-                            img_url, img_name, attachment_source, headers, page_timestamp)
+                            img_url, img_name, attachment_source, headers, attachment_timestamp)
                             
                 except Exception as e:
                     logger.error(f"Error processing image in page {page_title}: {str(e)}")
@@ -2563,23 +2688,26 @@ class DataIngestion:
                     
                     attachment_source = f"{source_path}/attachment/{file_name}"
                     
-                    # Check if attachment needs updating based on page timestamp
-                    needs_update = self._check_if_file_needs_update(attachment_source, page_timestamp)
+                    # Get attachment-specific timestamp
+                    attachment_timestamp = self._get_attachment_timestamp(data_url, page_timestamp)
+                    
+                    # Check if attachment needs updating based on attachment timestamp
+                    needs_update = self._check_if_file_needs_update(attachment_source, attachment_timestamp)
                     if not needs_update:
                         continue
                     
                     # Process based on attachment type
                     if self._is_document_attachment(file_extension, doc_configs):
                         processed_count += self._process_onenote_document(
-                            data_url, file_name, attachment_source, headers, page_timestamp)
+                            data_url, file_name, attachment_source, headers, attachment_timestamp)
                             
                     elif self._is_audio_attachment(file_extension, file_type, doc_configs):
                         processed_count += self._process_onenote_audio(
-                            data_url, file_name, attachment_source, headers, page_timestamp)
+                            data_url, file_name, attachment_source, headers, attachment_timestamp)
                             
                     elif self._is_video_attachment(file_extension, file_type, doc_configs):
                         processed_count += self._process_onenote_video(
-                            data_url, file_name, attachment_source, headers, page_timestamp)
+                            data_url, file_name, attachment_source, headers, attachment_timestamp)
                             
                 except Exception as e:
                     logger.error(f"Error processing file attachment in page {page_title}: {str(e)}")
@@ -2599,15 +2727,18 @@ class DataIngestion:
                     
                     attachment_source = f"{source_path}/attachment/{file_name}"
                     
-                    # Check if attachment needs updating based on page timestamp
-                    needs_update = self._check_if_file_needs_update(attachment_source, page_timestamp)
+                    # Get attachment-specific timestamp
+                    attachment_timestamp = self._get_attachment_timestamp(href, page_timestamp)
+                    
+                    # Check if attachment needs updating based on attachment timestamp
+                    needs_update = self._check_if_file_needs_update(attachment_source, attachment_timestamp)
                     if not needs_update:
                         continue
                     
                     # Process based on attachment type
                     if self._is_document_attachment(file_extension, doc_configs):
                         processed_count += self._process_onenote_document(
-                            href, file_name, attachment_source, headers, page_timestamp)
+                            href, file_name, attachment_source, headers, attachment_timestamp)
                             
                 except Exception as e:
                     logger.error(f"Error processing linked attachment in page {page_title}: {str(e)}")
@@ -2645,97 +2776,163 @@ class DataIngestion:
     
     # OneNote attachment processing methods
     
-    def _process_onenote_image(self, content_url, file_name, source, headers, page_timestamp):
-        """Process an image attachment from OneNote."""
-        logger.info(f"Processing image attachment: {file_name}")
+    def _process_onenote_image(self, content_url, img_name, source, headers, page_timestamp):
+        """Process an image attachment from OneNote.
         
-        # Truncate image file_name if too long (for logging)
-        display_name = file_name
-        if len(display_name) > 100:
-            display_name = display_name[:97] + "..."
-        
-        logger.info(f"Processing image attachment: {display_name}")
-        
-        # If the URL is a direct resource URL from OneNote HTML, use it as is
-        image_response = self.make_request_with_retry(content_url, headers)
-        
-        if not image_response or image_response.status_code != 200:
-            logger.warning(f"Failed to fetch image: {display_name}, status code: {image_response.status_code if image_response else 'no response'}")
-            return 0
+        Args:
+            content_url: URL of the image content
+            img_name: Name of the image file
+            source: Source path for the image
+            headers: HTTP headers for the request
+            page_timestamp: Timestamp of the page
             
+        Returns:
+            Number of images processed (1 if successful, 0 if failed)
+        """
         try:
-            image_data = Image.open(io.BytesIO(image_response.content))
-            embedding = self.generate_embedding(image_data, EmbeddingType.CLIP_IMAGE)
+            # Create clean identifier for the image
+            clean_name = self._create_clean_identifier(content_url, img_name, 'image_')
             
-            # Truncate source path if too long for Milvus (which has a limit of 256 chars)
-            truncated_source = source
-            if len(truncated_source) > 250:  # Leave some margin
-                # Keep the beginning and end for identification
-                prefix_length = 120
-                suffix_length = 120
-                truncated_source = f"{truncated_source[:prefix_length]}...{truncated_source[-suffix_length:]}"
+            # Create a shorter version of the source path to avoid exceeding Milvus limits
+            # Generate a hash for the source path to ensure it's always within limits
+            source_hash = hashlib.md5(source.encode()).hexdigest()[:16]
+            # Extract just the base of the original path to keep some readability
+            source_prefix = source.split('/')[:4]  # Keep only first few parts
+            source_prefix = '_'.join(source_prefix)
+            if len(source_prefix) > 30:  # If still too long, truncate it
+                source_prefix = source_prefix[:30]
+            clean_source = f"onenote_{source_prefix}_hash_{source_hash}"
             
-            # Also truncate file_name for the content field
-            content_text = f"Image: {file_name}"
-            if len(content_text) > 250:
-                content_text = f"Image: {file_name[:240]}..."
+            # Ensure clean_source doesn't exceed 90 chars (for safety margin)
+            if len(clean_source) > 90:
+                clean_source = f"onenote_{source_hash}"
             
-            self.add_to_milvus(content_text, embedding, "image_attachment", truncated_source, page_timestamp)
-            logger.info(f"Successfully processed image: {display_name}")
-            return 1
+            # Download the image
+            response = self.make_request_with_retry(content_url, headers)
+            if not response or response.status_code != 200:
+                logger.warning(f"Failed to download image: {content_url}")
+                return 0
+                
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                temp_path = temp_file.name
+                temp_file.write(response.content)
+            
+            try:
+                # Process the image
+                parsed_image = self._process_image(temp_path)
+                if not parsed_image or not parsed_image.get('image'):
+                    logger.warning(f"Failed to process image: {content_url}")
+                    return 0
+                
+                # Generate embedding for the image using CLIP
+                image_embedding = self._generate_image_embedding(parsed_image['image'])
+                
+                # Limit description to ensure it doesn't cause the content to exceed limits
+                description = parsed_image.get('description', 'No description')
+                if len(description) > 50:  # Keep description reasonably short
+                    description = description[:47] + "..."
+                
+                # Create content string with limited length
+                # Ensure total length stays under 95 characters (with safety margin)
+                content = f"Image: {clean_name[:30]}\nDescription: {description[:50]}"
+                
+                # Add to Milvus
+                self.add_to_milvus_with_timestamp(content, image_embedding, "image_attachment", clean_source, page_timestamp)
+                
+                logger.info(f"Successfully processed image: {content_url}")
+                return 1
+                
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    
         except Exception as e:
-            logger.error(f"Failed to process image {display_name}: {str(e)}")
+            logger.error(f"Error processing OneNote image {content_url}: {str(e)}")
             return 0
             
     def _process_onenote_document(self, content_url, file_name, source, headers, page_timestamp):
         """Process a document attachment from OneNote."""
-        logger.info(f"Processing document attachment: {file_name}")
-        
-        # If the URL is a direct resource URL from OneNote HTML, use it as is
-        doc_response = self.make_request_with_retry(content_url, headers)
-        
-        if not doc_response or doc_response.status_code != 200:
-            logger.warning(f"Failed to fetch document: {file_name}, status code: {doc_response.status_code if doc_response else 'no response'}")
-            return 0
-            
         try:
-            # Save document temporarily
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_name)[1]) as temp_file:
-                temp_file.write(doc_response.content)
+            # Create clean identifier for the document
+            clean_name = self._create_clean_identifier(content_url, file_name, 'doc_')
+            
+            # Create a shorter version of the source path to avoid exceeding Milvus limits
+            source_hash = hashlib.md5(source.encode()).hexdigest()[:16]
+            source_prefix = source.split('/')[:4]  # Keep only first few parts
+            source_prefix = '_'.join(source_prefix)
+            if len(source_prefix) > 30:  # If still too long, truncate it
+                source_prefix = source_prefix[:30]
+            clean_source = f"onenote_{source_prefix}_hash_{source_hash}"
+            
+            # Ensure clean_source doesn't exceed 90 chars (for safety margin)
+            if len(clean_source) > 90:
+                clean_source = f"onenote_{source_hash}"
+            
+            # Download the document
+            response = self.make_request_with_retry(content_url, headers)
+            if not response or response.status_code != 200:
+                logger.warning(f"Failed to download document: {content_url}")
+                return 0
+                
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 temp_path = temp_file.name
+                temp_file.write(response.content)
                 
-            # Process with Tika
-            parsed_doc = self.process_document(temp_path)
-            
-            if parsed_doc.get('extraction_method') != 'failed':
-                embedding = self.generate_embedding(parsed_doc['content'], EmbeddingType.CLIP_TEXT)
-                self.add_to_milvus(parsed_doc['content'], embedding, "document_attachment", source, page_timestamp)
-                logger.info(f"Successfully processed document: {file_name}")
+            try:
+                # Process the document
+                parsed_doc = self.process_document(temp_path)
+                if not parsed_doc or not parsed_doc.get('content'):
+                    logger.warning(f"Failed to process document: {content_url}")
+                    return 0
+                    
+                # Generate embedding
+                content = parsed_doc['content']
+                embedding = self.generate_embedding(content, EmbeddingType.CLIP_TEXT)
                 
-                # Clean up
-                os.unlink(temp_path)
+                # Add to Milvus
+                self.add_to_milvus_with_timestamp(content, embedding, "document", clean_source, page_timestamp)
+                
+                logger.info(f"Successfully processed document: {clean_name}")
                 return 1
-            
-            logger.warning(f"Failed to extract content from document: {file_name}")
-            os.unlink(temp_path)
-            return 0
-            
+                
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file {temp_path}: {str(e)}")
+                    
         except Exception as e:
-            logger.error(f"Failed to process document {file_name}: {str(e)}")
+            logger.error(f"Error processing document {content_url}: {str(e)}")
             return 0
             
     def _process_onenote_audio(self, content_url, file_name, source, headers, page_timestamp):
         """Process an audio attachment from OneNote."""
         logger.info(f"Processing audio attachment: {file_name}")
         
-        # If the URL is a direct resource URL from OneNote HTML, use it as is
-        audio_response = self.make_request_with_retry(content_url, headers)
-        
-        if not audio_response or audio_response.status_code != 200:
-            logger.warning(f"Failed to fetch audio: {file_name}, status code: {audio_response.status_code if audio_response else 'no response'}")
-            return 0
-            
         try:
+            # Create shorter version of source for Milvus
+            source_hash = hashlib.md5(source.encode()).hexdigest()[:16]
+            source_prefix = source.split('/')[:4]  # Keep only first few parts
+            source_prefix = '_'.join(source_prefix)
+            if len(source_prefix) > 30:  # If still too long, truncate it
+                source_prefix = source_prefix[:30]
+            clean_source = f"onenote_{source_prefix}_hash_{source_hash}"
+            
+            # Ensure clean_source doesn't exceed 90 chars (for safety margin)
+            if len(clean_source) > 90:
+                clean_source = f"onenote_{source_hash}"
+            
+            # If the URL is a direct resource URL from OneNote HTML, use it as is
+            audio_response = self.make_request_with_retry(content_url, headers)
+            
+            if not audio_response or audio_response.status_code != 200:
+                logger.warning(f"Failed to fetch audio: {file_name}, status code: {audio_response.status_code if audio_response else 'no response'}")
+                return 0
+                
             # Save audio temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_name)[1]) as temp_file:
                 temp_file.write(audio_response.content)
@@ -2746,14 +2943,20 @@ class DataIngestion:
             
             # Generate text embedding for transcription
             text_embedding = self.generate_embedding(transcription, EmbeddingType.CLIP_TEXT)
-            self.add_to_milvus(transcription, text_embedding, "audio_transcription", source, page_timestamp)
+            
+            # Limit file_name to avoid exceeding Milvus limits
+            short_name = file_name
+            if len(short_name) > 40:
+                short_name = short_name[:37] + "..."
+                
+            # Add transcription to Milvus
+            self.add_to_milvus(transcription, text_embedding, "audio_transcription", clean_source, page_timestamp)
             
             # Generate audio embedding
             # IMPORTANT: Use CLIP_TEXT for audio content as well to ensure dimension compatibility
-            # The previous code tried to use WAV2VEC which causes dimension mismatch with Milvus
-            audio_content = f"Audio: {file_name}"
+            audio_content = f"Audio: {short_name[:40]}"
             audio_embedding = self.generate_embedding(audio_content, EmbeddingType.CLIP_TEXT)
-            self.add_to_milvus(audio_content, audio_embedding, "audio_attachment", source, page_timestamp)
+            self.add_to_milvus(audio_content, audio_embedding, "audio_attachment", clean_source, page_timestamp)
             
             # Clean up
             os.unlink(temp_path)
@@ -2768,14 +2971,31 @@ class DataIngestion:
         """Process a video attachment from OneNote."""
         logger.info(f"Processing video attachment: {file_name}")
         
-        # If the URL is a direct resource URL from OneNote HTML, use it as is
-        video_response = self.make_request_with_retry(content_url, headers)
-        
-        if not video_response or video_response.status_code != 200:
-            logger.warning(f"Failed to fetch video: {file_name}, status code: {video_response.status_code if video_response else 'no response'}")
-            return 0
-            
         try:
+            # Create shorter version of source for Milvus
+            source_hash = hashlib.md5(source.encode()).hexdigest()[:16]
+            source_prefix = source.split('/')[:4]  # Keep only first few parts
+            source_prefix = '_'.join(source_prefix)
+            if len(source_prefix) > 30:  # If still too long, truncate it
+                source_prefix = source_prefix[:30]
+            clean_source = f"onenote_{source_prefix}_hash_{source_hash}"
+            
+            # Ensure clean_source doesn't exceed 90 chars (for safety margin)
+            if len(clean_source) > 90:
+                clean_source = f"onenote_{source_hash}"
+            
+            # Limit file_name to avoid exceeding Milvus limits
+            short_name = file_name
+            if len(short_name) > 40:
+                short_name = short_name[:37] + "..."
+                
+            # If the URL is a direct resource URL from OneNote HTML, use it as is
+            video_response = self.make_request_with_retry(content_url, headers)
+            
+            if not video_response or video_response.status_code != 200:
+                logger.warning(f"Failed to fetch video: {file_name}, status code: {video_response.status_code if video_response else 'no response'}")
+                return 0
+                
             # Save video temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file_name)[1]) as temp_file:
                 temp_file.write(video_response.content)
@@ -2788,8 +3008,14 @@ class DataIngestion:
             for i, frame in enumerate(frames):
                 # Generate embedding for each frame
                 frame_embedding = self.generate_embedding(frame, EmbeddingType.CLIP_IMAGE)
-                frame_content = f"Frame {i} from video {file_name}"
-                self.add_to_milvus(frame_content, frame_embedding, "video_attachment", f"{source}:frame_{i}", page_timestamp)
+                frame_content = f"Frame {i} from video {short_name[:30]}"
+                
+                # Generate a unique frame source that doesn't exceed limits
+                frame_source = f"{clean_source}_frame_{i}"
+                if len(frame_source) > 90:
+                    frame_source = f"{clean_source[:70]}_fr{i}"
+                    
+                self.add_to_milvus(frame_content, frame_embedding, "video_attachment", frame_source, page_timestamp)
                 processed_count += 1
                 
             # Clean up
@@ -2803,9 +3029,10 @@ class DataIngestion:
 
     @with_milvus_recovery(max_attempts=3)
     def _is_new_file(self, source_path):
-        """Check if a file is new (not yet in Milvus).
+        """Check if a file is new (not in Milvus yet).
         
-        This is an optimized version with caching to prevent redundant queries.
+        This method uses the same lookup logic as _check_if_file_needs_update but
+        only determines if the file exists, not if it needs updating.
         
         Args:
             source_path: Path to the file
@@ -2822,44 +3049,64 @@ class DataIngestion:
             return self.__class__._new_file_cache[source_path]
             
         try:
-            # Set a timeout for the query operation (5 seconds)
-            query_timeout = 5
+            # Sanitize path using the safe approach for Milvus queries
+            sanitized_path = self._sanitize_file_path(source_path)
             
-            # Escape special characters
-            escaped_source = source_path.replace("'", "''").replace('"', '""')
+            # Look up by sanitized file_path field using exact match
+            expr = f'file_path == "{sanitized_path}"'
+            results = self.collection.query(
+                expr=expr,
+                output_fields=["id", "metadata"],
+                limit=1
+            )
             
-            # Set the alarm
-            signal.alarm(query_timeout)
-            try:
-                # Optimized query - only get existence info with minimal fields
+            # If not found by exact match, try the filename after sanitizing
+            if len(results) == 0:
+                # Hash the source_path to create a consistent unique identifier
+                # This is useful to locate entries where we can't use direct path matching
+                source_hash = hashlib.md5(source_path.encode()).hexdigest()[:16]
+                expr = f'id == "{source_hash}"'
+                
+                # Try searching by ID hash
                 results = self.collection.query(
-                    expr=f'file_path == "{escaped_source}"',
-                    output_fields=["id"],
-                    limit=1
+                    expr=expr,
+                    output_fields=["id", "metadata"],
+                    limit=5
                 )
-                # Turn off the alarm
-                signal.alarm(0)
                 
-                is_new = len(results) == 0
-                # Cache the result
-                self.__class__._new_file_cache[source_path] = is_new
-                return is_new
-                
-            except TimeoutError:
-                logger.warning(f"Query timed out when checking if {source_path} is new")
-                # Turn off the alarm
-                signal.alarm(0)
-                # Assume it's not new to be safe
-                self.__class__._new_file_cache[source_path] = False
-                return False
-                
+                # If nothing found by ID hash, retrieve a small set of entries to check metadata
+                if len(results) == 0:
+                    # Use a limited query to check only the most recently added files
+                    results = self.collection.query(
+                        expr='',  # Empty query to get all records, but with limit
+                        output_fields=["id", "metadata"],
+                        limit=20
+                    )
+                    
+                    # Manually filter results to find matches by source
+                    if results:
+                        filtered_results = []
+                        for result in results:
+                            metadata = result.get("metadata", {})
+                            if isinstance(metadata, dict) and metadata.get("source") == source_path:
+                                filtered_results.append(result)
+                        results = filtered_results
+            
+            # Cache and return result
+            is_new = len(results) == 0
+            self.__class__._new_file_cache[source_path] = is_new
+            
+            if is_new:
+                logger.debug(f"NEW FILE: {source_path} - not found in Milvus")
+            else:
+                logger.debug(f"EXISTING FILE: {source_path} - found in Milvus")
+            
+            return is_new
+            
         except Exception as e:
-            # Turn off the alarm
-            signal.alarm(0)
-            logger.warning(f"Error checking if {source_path} is new: {str(e)}")
-            # Assume it's not new to be safe
-            self.__class__._new_file_cache[source_path] = False
-            return False
+            logger.warning(f"Error checking if file is new: {str(e)}")
+            # If there's an error, assume file is new to be safe
+            return True
 
     def check_milvus_containers(self):
         """Check if Milvus containers are running and healthy."""
@@ -3125,6 +3372,150 @@ class DataIngestion:
         except Exception as e:
             logger.error(f"Error processing video file {file_path}: {str(e)}")
             return False
+
+    def _get_attachment_timestamp(self, attachment_id, page_timestamp):
+        """Get a more specific timestamp for an attachment."""
+        # Try to extract a unique identifier from the attachment
+        attachment_hash = hashlib.md5(attachment_id.encode()).hexdigest()
+        
+        # Check if we have a cached timestamp for this attachment
+        if hasattr(self.__class__, '_attachment_timestamps'):
+            if attachment_hash in self.__class__._attachment_timestamps:
+                return self.__class__._attachment_timestamps[attachment_hash]
+        
+        # If not found, use the page timestamp
+        if not hasattr(self.__class__, '_attachment_timestamps'):
+            self.__class__._attachment_timestamps = {}
+        
+        self.__class__._attachment_timestamps[attachment_hash] = page_timestamp
+        return page_timestamp
+
+    def _html_to_text(self, html_content):
+        """Convert HTML content to clean text."""
+        try:
+            from bs4 import BeautifulSoup
+            
+            # Parse HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.extract()
+            
+            # Get text
+            text = soup.get_text()
+            
+            # Break into lines and remove leading and trailing space on each
+            lines = (line.strip() for line in text.splitlines())
+            
+            # Break multi-headlines into a line each
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            
+            # Remove blank lines
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            return text
+        except Exception as e:
+            logger.error(f"Error converting HTML to text: {str(e)}")
+            # Fallback to simple conversion
+            return ' '.join(html_content.split())
+
+    def _dump_milvus_paths(self):
+        """Debug function to dump all file paths from Milvus."""
+        try:
+            results = self.collection.query(
+                expr="file_path like '%'",  # Match all paths
+                output_fields=["file_path", "last_modified"],
+                limit=1000  # Adjust if needed
+            )
+            logger.info("=== Current paths in Milvus ===")
+            for result in results:
+                logger.info(f"Path: {result.get('file_path')}, Modified: {result.get('last_modified')}")
+            logger.info("=== End of Milvus paths ===")
+        except Exception as e:
+            logger.error(f"Error dumping Milvus paths: {str(e)}")
+
+    def _sanitize_file_path(self, path: str) -> str:
+        """Sanitize a file path to be safe for Milvus queries.
+        
+        Args:
+            path: The original file path
+            
+        Returns:
+            Sanitized file path safe for Milvus queries
+        """
+        if path is None:
+            return "null_path"
+            
+        # Replace newlines and multiple spaces with single space
+        path = ' '.join(path.split())
+                
+        # Replace all problematic characters for Milvus queries
+        # Replace dots, slashes, backslashes with underscores
+        path = path.replace('.', '_').replace('/', '_').replace('\\', '_')
+        path = path.replace(':', '_').replace('"', '_').replace("'", "_")
+        
+        # Replace any other problematic characters
+        path = re.sub(r'[*?:<>|]', '_', path)
+        
+        # Replace sequences of underscores with a single one
+        path = re.sub(r'_+', '_', path)
+        
+        # Normalize spaces
+        path = re.sub(r'\s+', ' ', path).strip()
+        
+        # Limit the length of the path to avoid issues
+        if len(path) > 90:  # Milvus has field length limits
+            # Keep the first part (first 50 chars) and hash the rest
+            # This ensures readability while staying under limits
+            prefix = path[:50]
+            rest_hash = hashlib.md5(path[50:].encode()).hexdigest()[:20]
+            path = f"{prefix}_hash_{rest_hash}"
+        
+        return path
+
+    def _create_clean_identifier(self, url: str, name: str = '', prefix: str = '') -> str:
+        """Create a clean, unique identifier for a file or attachment.
+        
+        Args:
+            url: The URL or data URL of the attachment
+            name: Optional name to use (will be cleaned)
+            prefix: Prefix to add to the identifier (e.g., 'image_', 'file_')
+            
+        Returns:
+            Clean, unique identifier
+        """
+        # Get base identifier from URL
+        base_id = url.split('/')[-1]
+        if not base_id or len(base_id) > 50:
+            base_id = hashlib.md5(url.encode()).hexdigest()[:12]
+        
+        # Clean the name if provided
+        if name and len(name) <= 50:
+            clean_name = re.sub(r'[^\w\s-]', '', name)
+            clean_name = re.sub(r'\s+', '_', clean_name.strip())
+            if clean_name:
+                return f"{prefix}{clean_name}_{base_id}"
+        
+        # Fallback to simple identifier
+        return f"{prefix}{base_id}"
+
+    def call_stack_contains(self, method_name):
+        """Check if the current call stack contains a specific method name.
+        
+        This helps prevent redundant checks when methods call each other.
+        
+        Args:
+            method_name: Method name to check for in the call stack
+            
+        Returns:
+            Boolean indicating if the method is in the call stack
+        """
+        stack = inspect.stack()
+        for frame_info in stack:
+            if frame_info.function == method_name:
+                return True
+        return False
 
 def ensure_directories():
     """Ensure required directories exist."""

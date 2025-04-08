@@ -15,14 +15,55 @@ import argparse
 import subprocess
 import importlib.util
 import json
+import functools
+import time
+import logging
 from enum import Enum
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('personal_rag.log')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class QueryMethod(str, Enum):
     """Types of query methods that can be used."""
     SEMANTIC = "semantic"  # Semantic search using embeddings
     KEYWORD = "keyword"    # Keyword-based search
     HYBRID = "hybrid"      # Combination of semantic and keyword search
+
+
+def with_milvus_recovery(max_attempts=3):
+    """Decorator to handle Milvus connection issues by automatically restarting containers when needed.
+    
+    Args:
+        max_attempts: Maximum number of retry attempts
+        
+    Returns:
+        Decorated function with retry logic
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as e:
+                    is_connection_error = any(err in str(e).lower() for err in 
+                                             ["timeout", "connection", "connect"])
+                    if attempt < max_attempts-1 and is_connection_error:
+                        logger.warning(f"Milvus operation failed: {str(e)}")
+                        # Try to restart Milvus completely
+                        self.ensure_milvus_running()
+                        continue
+                    raise
+        return wrapper
+    return decorator
 
 
 class PersonalRAG:
@@ -112,9 +153,10 @@ class PersonalRAG:
             print(f"Error loading config file: {str(e)}")
             return default_config
 
+    @with_milvus_recovery(max_attempts=3)
     def setup_milvus(self):
         """Setup Milvus connection and load collection."""
-        connections.connect(host='localhost', port='19530')
+        self._ensure_milvus_connection()
         
         if not utility.has_collection("personal_rag"):
             raise ValueError("Milvus collection 'personal_rag' does not exist. Please run data ingestion first.")
@@ -124,6 +166,105 @@ class PersonalRAG:
         
         # Verify schema compatibility
         self._verify_schema_compatibility()
+
+    def _ensure_milvus_connection(self):
+        """Ensure Milvus connection is active."""
+        try:
+            # Try to check connection by getting server version
+            if not connections.has_connection("default"):
+                logger.info("No active Milvus connection, connecting...")
+                connections.connect(host='localhost', port='19530')
+            return True
+        except Exception as e:
+            logger.warning(f"Milvus connection issue: {str(e)}")
+            try:
+                # Try to reconnect
+                if connections.has_connection("default"):
+                    connections.disconnect("default")
+                time.sleep(1)
+                connections.connect(host='localhost', port='19530')
+                logger.info("Reconnected to Milvus")
+                return True
+            except Exception as reconnect_e:
+                logger.error(f"Failed to reconnect to Milvus: {str(reconnect_e)}")
+                return False
+    
+    def check_milvus_containers(self):
+        """Check if Milvus containers are running and healthy."""
+        try:
+            # Check if Milvus containers are running
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=milvus", "--format", "{{.Names}}"],
+                capture_output=True, text=True, check=True
+            )
+            
+            containers = result.stdout.strip().split('\n')
+            if not containers or containers[0] == '':
+                logger.warning("No Milvus containers found")
+                return False, False
+            
+            # Check if all containers are healthy
+            all_running = len(containers) >= 2  # At least standalone and etcd
+            
+            # Check health status
+            health_result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Health.Status}}", "milvus-standalone"],
+                capture_output=True, text=True
+            )
+            
+            all_healthy = health_result.stdout.strip() == "healthy"
+            
+            return all_running, all_healthy
+        except Exception as e:
+            logger.error(f"Error checking Milvus containers: {str(e)}")
+            return False, False
+    
+    def restart_milvus_containers(self):
+        """Restart Milvus containers."""
+        try:
+            logger.info("Restarting Milvus containers...")
+            
+            # Stop existing containers
+            subprocess.run(["docker-compose", "down"], check=True)
+            
+            # Start containers
+            subprocess.run(["docker-compose", "up", "-d"], check=True)
+            
+            # Wait for containers to be ready
+            max_retries = 30
+            retry_interval = 2
+            
+            for i in range(max_retries):
+                all_running, all_healthy = self.check_milvus_containers()
+                
+                if all_running and all_healthy:
+                    logger.info("Milvus containers are running and healthy")
+                    return True
+                
+                if i < max_retries - 1:
+                    time.sleep(retry_interval)
+                else:
+                    logger.error("Timed out waiting for Milvus to be ready after restart")
+                    return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error restarting Milvus containers: {str(e)}")
+            return False
+    
+    def ensure_milvus_running(self):
+        """Ensure Milvus is running and healthy, restart if needed."""
+        all_running, all_healthy = self.check_milvus_containers()
+        
+        if not all_running:
+            logger.warning("Milvus containers are not all running, attempting restart...")
+            return self.restart_milvus_containers()
+        
+        if not all_healthy:
+            logger.warning("Milvus containers are running but not all healthy, attempting restart...")
+            return self.restart_milvus_containers()
+        
+        return True
 
     def _verify_schema_compatibility(self):
         """Verify that the Milvus schema is compatible with the query method."""
@@ -293,6 +434,7 @@ class PersonalRAG:
             
         return embedding
 
+    @with_milvus_recovery(max_attempts=3)
     def query(self, question: str, k: int = 10, return_full_docs: bool = False) -> Dict[str, Any]:
         """
         Query the RAG system with a question.
@@ -462,6 +604,7 @@ class PersonalRAG:
             "sources": sources
         }
     
+    @with_milvus_recovery(max_attempts=3)
     def _semantic_search(self, query: str, params: Dict[str, Any]) -> List[Any]:
         """Perform semantic search using embeddings."""
         # Generate query embedding
@@ -486,6 +629,7 @@ class PersonalRAG:
         
         return results
     
+    @with_milvus_recovery(max_attempts=3)
     def _keyword_search(self, query: str, params: Dict[str, Any]) -> List[Any]:
         """Perform keyword-based search."""
         # Get search parameters
@@ -513,6 +657,7 @@ class PersonalRAG:
         
         return formatted_results
     
+    @with_milvus_recovery(max_attempts=3)
     def _hybrid_search(self, query: str, params: Dict[str, Any]) -> List[Any]:
         """Perform hybrid search combining semantic and keyword approaches."""
         # Get search parameters

@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - Personal RAG System</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Personal RAG System</h1>
+            <nav>
+                <ul>
+                    <li><a href="/ui/index.html">Query</a></li>
+                    <li><a href="/ui/data_ingestion.html">Data Ingestion</a></li>
+                    <li><a href="/ui/file_management.html">File Management</a></li>
+                    <li><a href="/ui/settings.html" class="active">Settings</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="settings-section">
+                <h2>System Settings</h2>
+                <p>Configure your Personal RAG system settings. These settings are required for the system to function properly.</p>
+
+                <div id="setup-wizard" class="setup-wizard">
+                    <div class="wizard-step" id="step-welcome">
+                        <h3>Welcome to the Setup Wizard</h3>
+                        <p>This wizard will guide you through setting up your Personal RAG system.</p>
+                        <p>Please follow the steps to configure the necessary settings for your preferred data sources and query models.</p>
+                        <button id="start-wizard" class="primary-button">Start Setup</button>
+                    </div>
+
+                    <div class="wizard-step hidden" id="step-data-sources">
+                        <h3>Step 1: Select Data Sources</h3>
+                        <p>Choose which data sources you want to use:</p>
+
+                        <div class="checkbox-group">
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="local-source" name="data-source" value="local" checked>
+                                <label for="local-source">Local Files (Documents, Images, Videos, Audio)</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="github-source" name="data-source" value="github">
+                                <label for="github-source">GitHub Repositories</label>
+                            </div>
+                            <div class="checkbox-item">
+                                <input type="checkbox" id="onenote-source" name="data-source" value="onenote">
+                                <label for="onenote-source">Microsoft OneNote</label>
+                            </div>
+                        </div>
+
+                        <div class="wizard-buttons">
+                            <button id="next-to-llm" class="primary-button">Next</button>
+                        </div>
+                    </div>
+
+                    <div class="wizard-step hidden" id="step-llm">
+                        <h3>Step 2: Select LLM Model</h3>
+                        <p>Choose which language model you want to use for queries:</p>
+
+                        <div class="radio-group">
+                            <div class="radio-item">
+                                <input type="radio" id="gpt-model" name="llm-model" value="gpt" checked>
+                                <label for="gpt-model">OpenAI GPT (Requires API Key)</label>
+                            </div>
+                            <div class="radio-item">
+                                <input type="radio" id="claude-model" name="llm-model" value="claude">
+                                <label for="claude-model">Anthropic Claude (Requires API Key)</label>
+                            </div>
+                            <div class="radio-item">
+                                <input type="radio" id="llama-model" name="llm-model" value="llama4">
+                                <label for="llama-model">Llama 4 (Local Model)</label>
+                            </div>
+                        </div>
+
+                        <div class="wizard-buttons">
+                            <button id="back-to-sources" class="secondary-button">Back</button>
+                            <button id="next-to-credentials" class="primary-button">Next</button>
+                        </div>
+                    </div>
+
+                    <div class="wizard-step hidden" id="step-credentials">
+                        <h3>Step 3: Enter Credentials</h3>
+                        <p>Enter the required credentials based on your selections:</p>
+
+                        <form id="credentials-form">
+                            <!-- LLM Credentials -->
+                            <div id="gpt-credentials" class="credential-group">
+                                <h4>OpenAI GPT Credentials</h4>
+                                <div class="form-group">
+                                    <label for="openai-api-key">OpenAI API Key:</label>
+                                    <input type="password" id="openai-api-key" name="openai-api-key" placeholder="sk-...">
+                                    <div class="field-description">Required for GPT models. Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI</a>.</div>
+                                </div>
+                            </div>
+
+                            <div id="claude-credentials" class="credential-group hidden">
+                                <h4>Anthropic Claude Credentials</h4>
+                                <div class="form-group">
+                                    <label for="anthropic-api-key">Anthropic API Key:</label>
+                                    <input type="password" id="anthropic-api-key" name="anthropic-api-key" placeholder="sk-ant-...">
+                                    <div class="field-description">Required for Claude models. Get your API key from <a href="https://console.anthropic.com/settings/keys" target="_blank">Anthropic</a>.</div>
+                                </div>
+                            </div>
+
+                            <!-- Data Source Credentials -->
+                            <div id="github-credentials" class="credential-group hidden">
+                                <h4>GitHub Credentials</h4>
+                                <div class="form-group">
+                                    <label for="github-token">GitHub Personal Access Token:</label>
+                                    <input type="password" id="github-token" name="github-token" placeholder="github_pat_...">
+                                    <div class="field-description">Required for GitHub data source. Create a token with repo scope from <a href="https://github.com/settings/tokens" target="_blank">GitHub</a>.</div>
+                                </div>
+                            </div>
+
+                            <div id="onenote-credentials" class="credential-group hidden">
+                                <h4>Microsoft OneNote Credentials</h4>
+                                <div class="form-group">
+                                    <label for="microsoft-client-id">Microsoft Client ID:</label>
+                                    <input type="text" id="microsoft-client-id" name="microsoft-client-id">
+                                    <div class="field-description">Required for OneNote data source.</div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="microsoft-client-secret">Microsoft Client Secret:</label>
+                                    <input type="password" id="microsoft-client-secret" name="microsoft-client-secret">
+                                    <div class="field-description">Required for OneNote data source.</div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="microsoft-tenant-id">Microsoft Tenant ID:</label>
+                                    <input type="text" id="microsoft-tenant-id" name="microsoft-tenant-id">
+                                    <div class="field-description">Required for OneNote data source.</div>
+                                </div>
+                            </div>
+
+                            <!-- Configuration File -->
+                            <div class="credential-group">
+                                <h4>Configuration</h4>
+                                <div class="form-group">
+                                    <label for="data-type-config">Data Types Configuration File:</label>
+                                    <input type="text" id="data-type-config" name="data-type-config" value="data_types_config.json">
+                                    <div class="field-description">Path to the data types configuration file.</div>
+                                </div>
+                            </div>
+                        </form>
+
+                        <div class="wizard-buttons">
+                            <button id="back-to-llm" class="secondary-button">Back</button>
+                            <button id="save-settings" class="primary-button">Save Settings</button>
+                        </div>
+                    </div>
+
+                    <div class="wizard-step hidden" id="step-success">
+                        <h3>Setup Complete!</h3>
+                        <p>Your settings have been saved successfully.</p>
+                        <p>The following files have been generated:</p>
+                        <ul class="files-generated">
+                            <li><strong>.env</strong> - Contains your environment variables and API keys</li>
+                            <li><strong>data_types_config.json</strong> - Contains your data source configuration</li>
+                        </ul>
+                        <p>You can now use the Query and Data Ingestion features of your Personal RAG system.</p>
+
+                        <div class="wizard-buttons">
+                            <a href="/ui/index.html" class="button">Go to Query Page</a>
+                            <a href="/ui/data_ingestion.html" class="button">Go to Data Ingestion</a>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="settings-status" class="hidden">
+                    <div id="status-message"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2023 Personal RAG System</p>
+        </footer>
+    </div>
+
+    <script src="/js/settings.js"></script>
+</body>
+</html>

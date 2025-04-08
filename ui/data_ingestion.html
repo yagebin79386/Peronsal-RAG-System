@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data Ingestion - Personal RAG System</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Personal RAG System</h1>
+            <nav>
+                <ul>
+                    <li><a href="/ui/index.html">Query</a></li>
+                    <li><a href="/ui/data_ingestion.html" class="active">Data Ingestion</a></li>
+                    <li><a href="/ui/file_management.html">File Management</a></li>
+                    <li><a href="/ui/settings.html">Settings</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="data-ingestion-section">
+                <h2>Data Ingestion</h2>
+                <p>Select data sources and document types to ingest into your knowledge base.</p>
+
+                <div id="data-sources-container">
+                    <!-- Data sources will be loaded dynamically -->
+                    <div id="loading-sources" class="loading">Loading data sources...</div>
+                </div>
+
+                <div class="ingestion-controls">
+                    <button id="save-config" class="primary-button">Save Configuration</button>
+                    <button id="start-ingestion" class="action-button">Start Ingestion</button>
+                </div>
+
+                <div id="ingestion-status" class="hidden">
+                    <h3>Ingestion Status</h3>
+                    <div id="status-message"></div>
+                    <div id="progress-container" class="hidden">
+                        <div class="progress-bar">
+                            <div id="progress-fill"></div>
+                        </div>
+                        <div id="progress-text">0%</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>&copy; 2023 Personal RAG System</p>
+        </footer>
+    </div>
+
+    <script src="/js/data_ingestion.js"></script>
+</body>
+</html>

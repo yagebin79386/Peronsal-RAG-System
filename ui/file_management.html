@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Management - Personal RAG System</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Personal RAG System</h1>
+            <nav>
+                <ul>
+                    <li><a href="/ui/index.html">Query</a></li>
+                    <li><a href="/ui/data_ingestion.html">Data Ingestion</a></li>
+                    <li><a href="/ui/file_management.html" class="active">File Management</a></li>
+                    <li><a href="/ui/settings.html">Settings</a></li>
+                </ul>
+            </nav>
+        </header>
+
+        <main>
+            <section class="file-management-section">
+                <h2>File Management</h2>
+                <p>Manage your local files for the RAG system. Upload, view, and delete files in different categories.</p>
+
+                <div class="file-categories">
+                    <div class="category-tabs">
+                        <button class="tab-button active" data-category="documents">Documents</button>
+                        <button class="tab-button" data-category="images">Images</button>
+                        <button class="tab-button" data-category="audio">Audio</button>
+                        <button class="tab-button" data-category="videos">Videos</button>
+                        <button class="tab-button" data-category="pdfs">PDFs</button>
+                    </div>
+
+                    <div class="category-content">
+                        <div class="category-header">
+                            <h3 id="current-category">Documents</h3>
+                            <button id="upload-file-btn" class="upload-button">Upload File</button>
+                        </div>
+
+                        <div id="file-list-container" class="file-list-container">
+                            <div id="loading-files" class="loading">Loading files...</div>
+                            <div id="file-list" class="file-list hidden"></div>
+                            <div id="empty-message" class="empty-message hidden">No files found in this category.</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Upload Modal -->
+        <div id="upload-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Upload File</h3>
+                    <button id="close-modal" class="close-button">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <form id="upload-form">
+                        <div class="form-group">
+                            <label for="category-select">Category:</label>
+                            <select id="category-select">
+                                <option value="documents">Documents</option>
+                                <option value="images">Images</option>
+                                <option value="audio">Audio</option>
+                                <option value="videos">Videos</option>
+                                <option value="pdfs">PDFs</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="file-input">Select File:</label>
+                            <input type="file" id="file-input">
+                            <div id="file-type-info" class="file-type-info">
+                                Allowed extensions: .pdf, .doc, .docx, .txt, .rtf
+                            </div>
+                        </div>
+                        <div id="upload-error" class="error-message hidden"></div>
+                        <div class="form-actions">
+                            <button type="button" id="cancel-upload" class="secondary-button">Cancel</button>
+                            <button type="submit" id="confirm-upload" class="primary-button">Upload</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div id="delete-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Confirm Deletion</h3>
+                    <button id="close-delete-modal" class="close-button">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p>Are you sure you want to delete this file?</p>
+                    <p id="delete-filename" class="filename"></p>
+                    <div class="form-actions">
+                        <button id="cancel-delete" class="secondary-button">Cancel</button>
+                        <button id="confirm-delete" class="danger-button">Delete</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>&copy; 2023 Personal RAG System</p>
+        </footer>
+    </div>
+
+    <script src="/js/file_management.js"></script>
+</body>
+</html>
